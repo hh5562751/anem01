@@ -1,4 +1,4 @@
-# main_app.py (User App - Enhanced Activation & Error Handling - Data Safety V2 - Activation Thread & UI Fixes V2 - AppData Paths Confirmed - Auto Check & AttributeError Fix)
+# main_app.py (User App - Enhanced Activation & Error Handling - Data Safety V2 - Activation Thread & UI Fixes V2 - AppData Paths Confirmed - Auto Check & AttributeError Fix - Improved Auto Check Reliability - Corrected Auto Check Sequencing)
 import sys
 import json
 import os
@@ -106,7 +106,8 @@ class AnemApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self._should_initialize_ui = False
-        # تهيئة activation_successful مبكرًا لتجنب AttributeError
+        # تهيئة activation_successful مبكرًا جدًا في __init__ لتجنب أي AttributeError محتمل.
+        # هذا يضمن أن المتغير موجود دائمًا قبل أي استدعاءات لـ _initialize_and_check_activation.
         self.activation_successful = False
         self.firebase_service = FirebaseService() # هذا سيستخدم DEVICE_ID_FILE و ACTIVATION_STATUS_FILE من config
         self.activated_code_id = None
@@ -117,8 +118,12 @@ class AnemApp(QMainWindow):
         self.settings = {}
         self.activation_thread = None
 
+        # استدعاء _initialize_and_check_activation لتحديد حالة التفعيل الفعلية.
+        # self.activation_successful سيتم تحديث قيمتها داخل هذه الدالة.
         self._initialize_and_check_activation()
-        if not self.activation_successful: # سيعتمد على القيمة المحدثة من _initialize_and_check_activation
+
+        # التحقق من self.activation_successful بعد تحديثها.
+        if not self.activation_successful:
             logger.critical("AnemApp __init__: فشل تفعيل البرنامج. لن يتم إكمال تهيئة واجهة المستخدم.")
             # لا حاجة لـ QTimer.singleShot هنا، سيتم الخروج من البرنامج إذا لم تنجح التهيئة
             return
@@ -183,8 +188,8 @@ class AnemApp(QMainWindow):
         self.close() # سيؤدي إلى استدعاء closeEvent
 
     def _initialize_and_check_activation(self):
-        # self.activation_successful تم تهيئته بالفعل في __init__
-        # سيتم تحديث قيمته بواسطة _perform_activation_check_logic
+        # self.activation_successful تم تهيئته بالفعل إلى False في __init__
+        # سيتم تحديث قيمته هنا بواسطة _perform_activation_check_logic()
         self.activation_successful = self._perform_activation_check_logic()
         if not self.activation_successful:
             # إذا فشل التفعيل، لا تقم بإظهار الواجهة الرئيسية
@@ -228,9 +233,11 @@ class AnemApp(QMainWindow):
 
                 logger.warning(f"AnemApp: الكود المحلي '{local_code}' لم يعد صالحًا عبر الإنترنت: {online_message}.")
                 self._clear_local_activation_and_state(f"الكود المحلي ({local_code}) لم يعد صالحًا: {online_message}")
+                # استدعاء _show_activation_dialog_loop. القيمة المعادة منها هي التي ستحدد حالة التفعيل.
                 return self._show_activation_dialog_loop(initial_message=user_facing_message, initial_is_error=True)
 
         logger.info("AnemApp: البرنامج غير مفعل محليًا أو التحقق المحلي فشل. يتطلب التفعيل عبر الإنترنت.")
+        # استدعاء _show_activation_dialog_loop. القيمة المعادة منها هي التي ستحدد حالة التفعيل.
         return self._show_activation_dialog_loop()
 
     def _clear_local_activation_and_state(self, reason=""):
@@ -251,9 +258,9 @@ class AnemApp(QMainWindow):
         logger.info(f"AnemApp: Activation thread finished. Success: {success}, Msg: '{message_from_service}'")
         if not dialog_instance or not hasattr(dialog_instance, 'isVisible') or not dialog_instance.isVisible():
             logger.warning("AnemApp: _process_activation_result called but dialog_instance is None or not visible.")
-            return False
+            return False # مهم: إرجاع False إذا لم يكن الحوار صالحًا
 
-        dialog_instance.show_status_message("", is_waiting=False)
+        dialog_instance.show_status_message("", is_waiting=False) # إيقاف رسالة الانتظار
 
         if success and server_code_data:
             self.current_subscription_data = server_code_data
@@ -263,7 +270,7 @@ class AnemApp(QMainWindow):
             QMessageBox.information(dialog_instance, "نجاح التفعيل", message_from_service or "تم تفعيل البرنامج بنجاح!")
 
             self.firebase_service.listen_to_activation_code_changes(self.activated_code_id, self._pass_subscription_update_to_signal)
-            dialog_instance.accept()
+            dialog_instance.accept() # هذا سيجعل _show_activation_dialog_loop يعيد True
             return True # يشير إلى أن التفعيل كان ناجحًا
         else:
             if server_code_data: self.current_subscription_data = server_code_data
@@ -278,21 +285,34 @@ class AnemApp(QMainWindow):
                 else: user_friendly_error = message_from_service
 
             dialog_instance.show_status_message(user_friendly_error, is_error=True)
+            # لا يتم استدعاء dialog_instance.reject() هنا؛ المستخدم هو من يغلق الحوار أو يحاول مرة أخرى.
+            # القيمة المعادة من _show_activation_dialog_loop ستكون False إذا لم يتم قبول الحوار.
             return False # يشير إلى أن التفعيل فشل
 
 
     def _show_activation_dialog_loop(self, initial_message=None, initial_is_error=False):
+        # هذا هو المكان الذي يتم فيه عرض حوار التفعيل والتفاعل معه.
+        # القيمة المعادة من هذا الحوار (True للنجاح، False للفشل/الإلغاء)
+        # هي التي يتم تعيينها لـ self.activation_successful في النهاية.
         if self.activation_dialog_open:
             logger.warning("AnemApp: Activation dialog is already open. Skipping new instance.")
-            return self.activation_successful # إرجاع الحالة الحالية إذا كان الحوار مفتوحًا بالفعل
+            # إذا كان الحوار مفتوحًا بالفعل، فإننا نعتمد على الحالة الحالية لـ self.activation_successful
+            # التي تم تعيينها في المرة السابقة التي تم فيها إغلاق هذا الحوار.
+            return self.activation_successful
 
         self.activation_dialog_open = True
-        activation_dialog = ActivationDialog(self)
+        activation_dialog = ActivationDialog(self) # هذا هو QDialog
 
         activation_processing_started_locally = False
 
+        # هذا المتغير سيحمل نتيجة معالجة التفعيل (نجاح/فشل)
+        # ليتم إرجاعه بواسطة _show_activation_dialog_loop
+        activation_outcome_from_processing = False
+
         def handle_activation_attempt(code_from_dialog):
             nonlocal activation_processing_started_locally
+            nonlocal activation_outcome_from_processing # للسماح بتعديلها
+
             if activation_processing_started_locally:
                 logger.warning("Activation attempt while another is in progress. Ignoring.")
                 return
@@ -314,20 +334,26 @@ class AnemApp(QMainWindow):
 
             self.activation_thread = ActivationProcessingThread(self.firebase_service, code_from_dialog, self)
 
-            # استخدام lambda لتمرير dialog_instance بشكل صحيح
-            self.activation_thread.activation_finished.connect(
-                lambda success, msg, data, ad=activation_dialog: (
-                    self._process_activation_result(success, msg, data, ad)
-                )
-            )
+            def on_activation_processed(success, msg, data):
+                # هذه الدالة يتم استدعاؤها عند انتهاء خيط التفعيل
+                # وتقوم بتحديث activation_outcome_from_processing
+                nonlocal activation_outcome_from_processing
+                activation_outcome_from_processing = self._process_activation_result(success, msg, data, activation_dialog)
+                # إذا نجح التفعيل (outcome is True)، فإن dialog_instance.accept() يتم استدعاؤه في _process_activation_result
+                # وهذا سيؤدي إلى إغلاق الحوار مع QDialog.Accepted
+
+            self.activation_thread.activation_finished.connect(on_activation_processed)
 
             def on_thread_actually_finished():
                 nonlocal activation_processing_started_locally
                 activation_processing_started_locally = False
+                # التأكد من أن رسالة "جاري الانتظار" لا تبقى إذا فشل الخيط أو انتهى بدون قبول الحوار
                 if hasattr(activation_dialog, 'isVisible') and activation_dialog.isVisible():
-                    if activation_dialog.result() != QDialog.Accepted: # فقط إذا لم يتم قبول الحوار بالفعل
+                    if activation_dialog.result() != QDialog.Accepted:
                          current_status_text = activation_dialog.status_message_area.toPlainText()
-                         if "⏳" not in current_status_text: # لا تقم بتحديث الرسالة إذا كانت لا تزال "جاري الانتظار"
+                         if "⏳" in current_status_text and not activation_outcome_from_processing: # إذا كان لا يزال ينتظر وفشل التفعيل
+                            activation_dialog.show_status_message(current_status_text.replace("⏳", "❌").strip(), is_error=True, is_waiting=False)
+                         elif "⏳" in current_status_text: # إذا كان لا يزال ينتظر ولكننا لا نعرف النتيجة بعد (نادر)
                             activation_dialog.show_status_message(current_status_text, is_waiting=False)
 
 
@@ -342,16 +368,13 @@ class AnemApp(QMainWindow):
 
         parent_window_for_centering = self if self.isVisible() else QApplication.desktop()
         screen_geometry = QApplication.desktop().availableGeometry(parent_window_for_centering)
-
         activation_dialog.adjustSize()
-
         x_pos = screen_geometry.left() + (screen_geometry.width() - activation_dialog.width()) // 2
         y_pos = screen_geometry.top() + (screen_geometry.height() - activation_dialog.height()) // 2
         activation_dialog.move(x_pos, y_pos)
         logger.info(f"تم تعيين موقع حوار التفعيل إلى: ({x_pos}, {y_pos}) على الشاشة.")
 
-
-        dialog_result_code = activation_dialog.exec_()
+        dialog_result_code = activation_dialog.exec_() # هذا يوقف التنفيذ حتى يتم إغلاق الحوار
 
         if self.activation_thread and self.activation_thread.isRunning():
             logger.info("Activation dialog closed, stopping activation thread if running.")
@@ -361,14 +384,13 @@ class AnemApp(QMainWindow):
         self.activation_dialog_open = False
 
         if dialog_result_code == QDialog.Accepted:
-            # self.activation_successful يتم تحديثه داخل _process_activation_result
-            # إذا تم قبول الحوار، فهذا يعني أن _process_activation_result أعاد True
-            return True
+            # إذا تم قبول الحوار، فهذا يعني أن _process_activation_result استدعى dialog.accept()
+            # وأن activation_outcome_from_processing يجب أن تكون True.
+            return True # التفعيل نجح
         else:
             logger.warning(f"AnemApp: عملية التفعيل ألغيت من قبل المستخدم أو أُغلقت (Result: {dialog_result_code}).")
-            # إذا لم يتم التفعيل بنجاح (سواء بالإلغاء أو الفشل)، فإن self.activation_successful يجب أن تكون False
-            # وهذا سيتم التعامل معه في _initialize_and_check_activation
-            return False # يشير إلى أن حلقة الحوار انتهت بدون تفعيل ناجح
+            # إذا تم إلغاء الحوار أو إغلاقه بطريقة أخرى، فإن التفعيل لم ينجح.
+            return False # التفعيل فشل أو تم إلغاؤه
 
     def _show_subscription_details_dialog(self):
         if self.current_subscription_data:
@@ -1229,7 +1251,7 @@ class AnemApp(QMainWindow):
         # استخدام QLocale للغة العربية (الجزائر) لتنسيق التاريخ والوقت
         arabic_locale = QLocale(QLocale.Arabic, QLocale.Algeria)
         # تنسيق التاريخ والوقت: اسم اليوم، اليوم الشهر السنة - الساعة:الدقيقة:الثانية صباحًا/مساءً
-        self.datetime_label.setText(arabic_locale.toString(now, "dddd, dd MMMM yyyy - hh:mm:ss AP"))
+        self.datetime_label.setText(arabic_locale.toString(now, "dddd, dd MMMM yy - hh:mm:ss AP"))
 
 
     def toggle_column_visibility(self, checked):
@@ -1455,22 +1477,49 @@ class AnemApp(QMainWindow):
             fetch_thread.update_member_gui_signal.connect(self.update_member_gui_in_table)
             fetch_thread.new_data_fetched_signal.connect(self.update_member_name_in_table)
             fetch_thread.member_processing_started_signal.connect(lambda idx: self.handle_member_processing_signal(idx, True))
-            # عند انتهاء جلب المعلومات الأولية، قم بتشغيل الفحص الفوري
+            
+            # --- التعديل الرئيسي هنا ---
+            # ربط member_processing_finished_signal بدالة وسيطة
             fetch_thread.member_processing_finished_signal.connect(
-                lambda idx, new_member_original_idx=current_original_index: self._trigger_auto_check_after_add(new_member_original_idx)
+                lambda idx, new_member_original_idx=current_original_index: self._handle_fetch_initial_info_finished(new_member_original_idx)
             )
+            # --------------------------
+
             self.initial_fetch_threads.append(fetch_thread)
             fetch_thread.start()
 
+    def _handle_fetch_initial_info_finished(self, original_member_index):
+        """
+        يتم استدعاؤها عند انتهاء FetchInitialInfoThread.
+        تقوم بتحديث حالة المعالجة ثم تستدعي _trigger_auto_check_after_add.
+        """
+        logger.debug(f"FetchInitialInfoThread finished for member index {original_member_index}. Setting processing to False.")
+        # التأكد من أن العضو لا يزال موجودًا في القائمة قبل محاولة الوصول إليه
+        if 0 <= original_member_index < len(self.members_list):
+            self.handle_member_processing_signal(original_member_index, False) # تعيين is_processing إلى False
+            # الآن، يمكن استدعاء _trigger_auto_check_after_add بأمان
+            self._trigger_auto_check_after_add(original_member_index)
+        else:
+            logger.warning(f"_handle_fetch_initial_info_finished: Member at index {original_member_index} no longer exists.")
+
+
     def _trigger_auto_check_after_add(self, original_member_index):
         """
-        يتم استدعاؤها بعد انتهاء FetchInitialInfoThread للعضو المضاف حديثًا.
+        يتم استدعاؤها بعد انتهاء FetchInitialInfoThread للعضو المضاف حديثًا
+        وبعد التأكد من أن is_processing = False.
         تقوم ببدء فحص فوري (SingleMemberCheckThread) للعضو.
         """
         if 0 <= original_member_index < len(self.members_list):
             member = self.members_list[original_member_index]
             member_display_name = self._get_member_display_name_with_index(member, original_member_index)
             logger.info(f"اكتمل جلب المعلومات الأولية للعضو {member_display_name}. بدء الفحص التلقائي الفوري...")
+            
+            if member.is_processing: # هذا التحقق يجب أن يكون False الآن بفضل _handle_fetch_initial_info_finished
+                logger.warning(f"_trigger_auto_check_after_add: العضو {member_display_name} لا يزال قيد المعالجة (غير متوقع). تأجيل الفحص الفوري.")
+                self._show_toast(f"العضو {member_display_name} لا يزال قيد المعالجة (غير متوقع). سيتأخر الفحص الفوري قليلاً.", type="warning")
+                QTimer.singleShot(500, lambda: self._trigger_auto_check_after_add(original_member_index)) # إعادة محاولة بعد فترة قصيرة جدًا
+                return
+
             self._show_toast(f"بدء الفحص التلقائي الفوري للعضو {member_display_name}.", type="info")
             self.check_member_now(original_member_index) # استدعاء وظيفة الفحص الفوري
         else:
@@ -1576,7 +1625,7 @@ class AnemApp(QMainWindow):
                 fetch_thread.member_processing_started_signal.connect(lambda idx: self.handle_member_processing_signal(idx, True))
                 # عند انتهاء جلب المعلومات، قم بتشغيل الفحص الفوري
                 fetch_thread.member_processing_finished_signal.connect(
-                     lambda idx, edited_member_idx=original_member_index: self._trigger_auto_check_after_add(edited_member_idx)
+                     lambda idx, edited_member_idx=original_member_index: self._handle_fetch_initial_info_finished(edited_member_idx) # استخدام الدالة الوسيطة
                 )
                 self.initial_fetch_threads.append(fetch_thread)
                 fetch_thread.start()
@@ -2101,3 +2150,4 @@ if __name__ == '__main__':
     else:
         main_window.show()
         sys.exit(app.exec_())
+
